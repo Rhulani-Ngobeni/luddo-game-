@@ -1,0 +1,358 @@
+import math
+import random#random  allows for random number generation, which is used in the game for dice rolls and AI decisions
+import sys
+import pygame
+
+CS = 40                      # cell size
+BOARD = CS * 15
+W, H = BOARD + 220, BOARD
+FPS = 60
+
+NAMES = ["Red", "Green", "Yellow", "Blue"]
+COLORS = [(214, 48, 49), (39, 174, 96), (241, 196, 15), (41, 128, 230)]
+LIGHT = [(250, 190, 190), (190, 235, 205), (252, 238, 170), (190, 215, 250)]
+START = [0, 13, 26, 39]                      # track index where each colour enters
+YARD = [(0, 0), (9, 0), (9, 9), (0, 9)]      # top-left cell of each yard
+SAFE = {0, 8, 13, 21, 26, 34, 39, 47}
+
+
+def build_track():
+    t = [(x, 6) for x in range(1, 6)] + [(6, y) for y in range(5, -1, -1)] + [(7, 0), (8, 0)]
+    t += [(8, y) for y in range(1, 6)] + [(x, 6) for x in range(9, 15)] + [(14, 7), (14, 8)]
+    t += [(x, 8) for x in range(13, 8, -1)] + [(8, y) for y in range(9, 15)] + [(7, 14), (6, 14)]
+    t += [(6, y) for y in range(13, 8, -1)] + [(x, 8) for x in range(5, -1, -1)] + [(0, 7), (0, 6)]
+    assert len(t) == 52
+    return t
+
+
+TRACK = build_track()
+
+
+def home_cell(p, k):          # k = 1..5 along the coloured home column
+    return [(k, 7), (7, k), (14 - k, 7), (7, 14 - k)][p]
+
+
+def cell_px(c):
+    return ((c[0] + .5) * CS, (c[1] + .5) * CS)
+
+
+def piece_pos(p, i, prog):
+    """Return ((x, y), key) for a piece; key groups pieces sharing a cell."""
+    if prog == -1:
+        ox, oy = YARD[p]
+        dx, dy = [(1.5, 1.5), (3.5, 1.5), (1.5, 3.5), (3.5, 3.5)][i]
+        return ((ox + dx) * CS, (oy + dy) * CS), ("y", p, i)
+    if prog <= 50:
+        c = TRACK[(START[p] + prog) % 52]
+        return cell_px(c), c
+    if prog <= 55:
+        c = home_cell(p, prog - 50)
+        return cell_px(c), c
+    d = [(-1, 0), (0, -1), (1, 0), (0, 1)][p]
+    cx, cy = 7.5 * CS, 7.5 * CS
+    off = (i - 1.5) * 9
+    return (cx + d[0] * .75 * CS + d[1] * off, cy + d[1] * .75 * CS + d[0] * off), ("f", p, i)
+
+
+def star(surface, color, center, r):
+    pts = []
+    for k in range(10):
+        a = -math.pi / 2 + k * math.pi / 5
+        rr = r if k % 2 == 0 else r * .45
+        pts.append((center[0] + rr * math.cos(a), center[1] + rr * math.sin(a)))
+    pygame.draw.polygon(surface, color, pts)
+
+
+def make_board():
+    s = pygame.Surface((BOARD, BOARD))
+    s.fill((250, 248, 240))
+    for p in range(4):                                   # yards
+        ox, oy = YARD[p]
+        pygame.draw.rect(s, COLORS[p], (ox * CS, oy * CS, 6 * CS, 6 * CS))
+        pygame.draw.rect(s, LIGHT[p], ((ox + 1) * CS, (oy + 1) * CS, 4 * CS, 4 * CS), border_radius=12)
+        for i in range(4):
+            pos, _ = piece_pos(p, i, -1)
+            pygame.draw.circle(s, COLORS[p], pos, 17)
+            pygame.draw.circle(s, (255, 255, 255), pos, 12)
+    for idx, c in enumerate(TRACK):                      # main track
+        r = pygame.Rect(c[0] * CS, c[1] * CS, CS, CS)
+        col = (255, 255, 255)
+        for p in range(4):
+            if idx == START[p]:
+                col = COLORS[p]
+        pygame.draw.rect(s, col, r)
+        pygame.draw.rect(s, (90, 90, 90), r, 1)
+        if idx in SAFE:
+            star(s, (255, 255, 255) if col != (255, 255, 255) else (150, 150, 150), r.center, 11)
+    for p in range(4):                                   # home columns
+        for k in range(1, 6):
+            c = home_cell(p, k)
+            r = pygame.Rect(c[0] * CS, c[1] * CS, CS, CS)
+            pygame.draw.rect(s, COLORS[p], r)
+            pygame.draw.rect(s, (90, 90, 90), r, 1)
+    m = 7.5 * CS                                         # centre triangles
+    tri = [((6, 6), (6, 9)), ((6, 6), (9, 6)), ((9, 6), (9, 9)), ((6, 9), (9, 9))]
+    for p, (a, b) in enumerate(tri):
+        pygame.draw.polygon(s, COLORS[p], [(a[0] * CS, a[1] * CS), (b[0] * CS, b[1] * CS), (m, m)])
+    return s
+
+
+def draw_dice(surf, rect, value, active):
+    pygame.draw.rect(surf, (255, 255, 255), rect, border_radius=14)
+    pygame.draw.rect(surf, (255, 215, 0) if active else (120, 120, 120), rect, 4, border_radius=14)
+    g = {1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8]}
+    for n in g[value]:
+        x = rect.x + rect.w * (.25 + .25 * (n % 3))
+        y = rect.y + rect.h * (.25 + .25 * (n // 3))
+        pygame.draw.circle(surf, (30, 30, 30), (x, y), 7)
+
+
+class Game:
+    def __init__(self, humans):
+        self.humans = humans
+        self.pieces = [[-1] * 4 for _ in range(4)]
+        self.turn = 0
+        self.state = "roll"       # roll, rolling, select, think, pause, over
+        self.dice = 1
+        self.t = pygame.time.get_ticks()
+        self.msg = "Roll the dice!"
+        self.movable = []
+        self.chosen = None
+        self.extra = False
+        self.winner = None
+
+    def is_human(self, p):
+        return p < self.humans
+
+    def set_state(self, s):
+        self.state = s
+        self.t = pygame.time.get_ticks()
+
+    def start_roll(self):
+        self.set_state("rolling")
+
+    def can_move(self, p, i):
+        prog = self.pieces[p][i]
+        return self.dice == 6 if prog == -1 else prog + self.dice <= 56
+
+    def after_roll(self):
+        p = self.turn
+        self.movable = [i for i in range(4) if self.can_move(p, i)]
+        self.extra = False
+        if not self.movable:
+            self.msg = f"{NAMES[p]} rolled {self.dice}: no moves"
+            self.set_state("pause")
+        elif self.is_human(p) and len(self.movable) > 1:
+            self.msg = f"{NAMES[p]} rolled {self.dice}: pick a piece"
+            self.set_state("select")
+        else:
+            self.chosen = self.movable[0] if len(self.movable) == 1 and self.is_human(p) else \
+                (self.movable[0] if len(self.movable) == 1 else self.ai_choose())
+            self.msg = f"{NAMES[p]} rolled {self.dice}"
+            self.set_state("think")
+
+    def opponents_at(self, absidx, p):
+        out = []
+        for q in range(4):
+            if q == p:
+                continue
+            for j, prog in enumerate(self.pieces[q]):
+                if 0 <= prog <= 50 and (START[q] + prog) % 52 == absidx:
+                    out.append((q, j))
+        return out
+
+    def ai_choose(self):
+        p, r = self.turn, self.dice
+        best, best_s = self.movable[0], -1e9
+        for i in self.movable:
+            prog = self.pieces[p][i]
+            new = 0 if prog == -1 else prog + r
+            s = new + random.random()
+            if new == 56:
+                s += 100
+            if prog == -1:
+                s += 40
+            if new >= 51:
+                s += 20
+            if new <= 50:
+                a = (START[p] + new) % 52
+                if a in SAFE:
+                    s += 15
+                elif self.opponents_at(a, p):
+                    s += 80
+            if 0 <= prog <= 50 and (START[p] + prog) % 52 in SAFE:
+                s -= 8        # slightly prefer leaving pieces on safe squares
+            if s > best_s:
+                best, best_s = i, s
+        return best
+
+    def move(self, i):
+        p = self.turn
+        prog = self.pieces[p][i]
+        new = 0 if prog == -1 else prog + self.dice
+        self.pieces[p][i] = new
+        self.extra = self.dice == 6
+        self.msg = f"{NAMES[p]} rolled {self.dice}"
+        if new <= 50:
+            a = (START[p] + new) % 52
+            if a not in SAFE:
+                hit = self.opponents_at(a, p)
+                # a pair of the same colour forms a block, so only capture singles
+                for q, j in hit:
+                    if sum(1 for x in self.pieces[q] if 0 <= x <= 50 and (START[q] + x) % 52 == a) == 1:
+                        self.pieces[q][j] = -1
+                        self.msg = f"{NAMES[p]} captured {NAMES[q]}!"
+                        self.extra = True
+        if new == 56:
+            self.msg = f"{NAMES[p]} got a piece home!"
+            self.extra = True
+        if all(x == 56 for x in self.pieces[p]):
+            self.winner = p
+        self.movable = []
+        self.set_state("pause")
+
+    def update(self):
+        now = pygame.time.get_ticks()
+        el = now - self.t
+        if self.state == "roll" and not self.is_human(self.turn) and el > 700:
+            self.start_roll()
+        elif self.state == "rolling" and el > 600:
+            self.dice = random.randint(1, 6)
+            self.after_roll()
+        elif self.state == "think" and el > 600:
+            self.move(self.chosen)
+        elif self.state == "pause" and el > 900:
+            if self.winner is not None:
+                self.state = "over"
+                self.msg = f"{NAMES[self.winner]} wins!"
+                return
+            if not self.extra:
+                self.turn = (self.turn + 1) % 4
+            self.msg = f"{NAMES[self.turn]}'s turn"
+            self.set_state("roll")
+
+    def click(self, pos, dice_rect):
+        if self.state == "roll" and self.is_human(self.turn) and dice_rect.collidepoint(pos):
+            self.start_roll()
+        elif self.state == "select":
+            for i in self.movable:
+                (x, y), _ = piece_pos(self.turn, i, self.pieces[self.turn][i])
+                if math.hypot(pos[0] - x, pos[1] - y) < 18:
+                    self.move(i)
+                    return
+
+    def draw(self, screen, board, fonts, dice_rect):
+        screen.blit(board, (0, 0))
+        groups = {}
+        for p in range(4):
+            for i, prog in enumerate(self.pieces[p]):
+                pos, key = piece_pos(p, i, prog)
+                groups.setdefault(key, []).append((p, i, pos))
+        now = pygame.time.get_ticks()
+        for key, items in groups.items():
+            offs = [(0, 0)] if len(items) == 1 else [(-8, -8), (8, -8), (-8, 8), (8, 8)]
+            rad = 14 if len(items) == 1 else 10
+            for n, (p, i, (x, y)) in enumerate(items):
+                x += offs[n % len(offs)][0]
+                y += offs[n % len(offs)][1]
+                if self.state == "select" and p == self.turn and i in self.movable:
+                    pygame.draw.circle(screen, (255, 255, 255), (x, y), rad + 5 + int(3 * math.sin(now / 150)), 3)
+                pygame.draw.circle(screen, (20, 20, 20), (x, y), rad + 2)
+                pygame.draw.circle(screen, COLORS[p], (x, y), rad)
+                pygame.draw.circle(screen, (255, 255, 255), (x, y), max(3, rad // 3))
+        # side panel
+        pygame.draw.rect(screen, (32, 34, 44), (BOARD, 0, 220, H))
+        x0 = BOARD + 15
+        pygame.draw.circle(screen, COLORS[self.turn], (x0 + 10, 40), 12)
+        who = "You" if self.is_human(self.turn) else "CPU"
+        screen.blit(fonts[1].render(f"{NAMES[self.turn]} ({who})", True, (255, 255, 255)), (x0 + 30, 28))
+        face = random.randint(1, 6) if self.state == "rolling" else self.dice
+        draw_dice(screen, dice_rect, face, self.state == "roll" and self.is_human(self.turn))
+        hint = "Click dice / SPACE" if self.state == "roll" and self.is_human(self.turn) else ""
+        screen.blit(fonts[0].render(hint, True, (255, 215, 0)), (x0, 340))
+        for n, line in enumerate(self.wrap(self.msg, fonts[0], 190)):
+            screen.blit(fonts[0].render(line, True, (230, 230, 230)), (x0, 375 + n * 22))
+        for p in range(4):
+            done = sum(1 for x in self.pieces[p] if x == 56)
+            pygame.draw.circle(screen, COLORS[p], (x0 + 10, 480 + p * 26), 8)
+            tag = "Human" if self.is_human(p) else "CPU"
+            screen.blit(fonts[0].render(f"{NAMES[p]} {tag}: {done}/4 home", True, (220, 220, 220)),
+                        (x0 + 26, 471 + p * 26))
+        if self.state == "over":
+            ov = pygame.Surface((W, H), pygame.SRCALPHA)
+            ov.fill((0, 0, 0, 170))
+            screen.blit(ov, (0, 0))
+            t = fonts[2].render(f"{NAMES[self.winner]} wins!", True, COLORS[self.winner])
+            screen.blit(t, t.get_rect(center=(W // 2, H // 2 - 20)))
+            t = fonts[1].render("R = play again    M = menu", True, (255, 255, 255))
+            screen.blit(t, t.get_rect(center=(W // 2, H // 2 + 30)))
+
+    @staticmethod
+    def wrap(text, font, width):
+        lines, cur = [], ""
+        for w in text.split():
+            test = (cur + " " + w).strip()
+            if font.size(test)[0] > width:
+                lines.append(cur)
+                cur = w
+            else:
+                cur = test
+        return lines + [cur]
+
+
+def draw_menu(screen, board, fonts):
+    screen.blit(board, (0, 0))
+    pygame.draw.rect(screen, (32, 34, 44), (BOARD, 0, 220, H))
+    ov = pygame.Surface((W, H), pygame.SRCALPHA)
+    ov.fill((0, 0, 0, 190))
+    screen.blit(ov, (0, 0))
+    lines = [(fonts[2], "LUDO", (255, 215, 0), 150),
+             (fonts[1], "Press 1-4: number of human players", (255, 255, 255), 250),
+             (fonts[0], "The remaining colours are played by the CPU", (200, 200, 200), 285),
+             (fonts[0], "Roll a 6 to leave the yard. Exact roll needed to finish.", (200, 200, 200), 330),
+             (fonts[0], "Sixes, captures and reaching home give an extra turn.", (200, 200, 200), 355)]
+    for f, txt, col, y in lines:
+        t = f.render(txt, True, col)
+        screen.blit(t, t.get_rect(center=(W // 2, y)))
+
+
+def main():
+    pygame.init()
+    screen = pygame.display.set_mode((W, H))
+    pygame.display.set_caption("Ludo")
+    clock = pygame.time.Clock()
+    fonts = [pygame.font.SysFont("arial", 16), pygame.font.SysFont("arial", 22, bold=True),
+             pygame.font.SysFont("arial", 64, bold=True)]
+    board = make_board()
+    dice_rect = pygame.Rect(BOARD + 65, 210, 90, 90)
+    game, humans = None, 1
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
+                pygame.quit()
+                sys.exit()
+            if game is None:
+                if e.type == pygame.KEYDOWN and pygame.K_1 <= e.key <= pygame.K_4:
+                    humans = e.key - pygame.K_0
+                    game = Game(humans)
+                continue
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                game.click(e.pos, dice_rect)
+            elif e.type == pygame.KEYDOWN:
+                if e.key in (pygame.K_SPACE, pygame.K_RETURN) and game.state == "roll" and game.is_human(game.turn):
+                    game.start_roll()
+                elif e.key == pygame.K_r and game.state == "over":
+                    game = Game(humans)
+                elif e.key == pygame.K_m and game.state == "over":
+                    game = None
+        if game is None:
+            draw_menu(screen, board, fonts)
+        else:
+            game.update()
+            game.draw(screen, board, fonts, dice_rect)
+        pygame.display.flip()
+        clock.tick(FPS)
+
+
+if __name__ == "__main__":
+    main()
